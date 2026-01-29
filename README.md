@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🔌 SqlGateway.MCP
+# 🔌 Mcp.SqlServer.Core
 ### The .NET 10 Model Context Protocol Server for SQL Server
 
 <img src="https://readme-typing-svg.herokuapp.com?font=JetBrains+Mono&size=22&duration=3000&pause=1000&center=true&vCenter=true&width=700&lines=Connect+LLMs+to+SQL+Server+Securely.;Schema+Aware.+Read-Only+Enforced.;Built+on+.NET+10." />
