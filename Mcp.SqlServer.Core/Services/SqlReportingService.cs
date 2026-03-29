@@ -1,6 +1,8 @@
+using Dapper;
 using Microsoft.Extensions.Options;
 using Mcp.SqlServer.Core.Abstractions;
 using Mcp.SqlServer.Core.Caching;
+using Mcp.SqlServer.Core.Internal;
 
 namespace Mcp.SqlServer.Core.Services;
 
@@ -116,28 +118,13 @@ internal sealed class SqlReportingService
         }
 
         await using var lease = await _connectionFactory.OpenAsync(database, cancellationToken).ConfigureAwait(false);
-        await using var command = lease.Connection.CreateCommand();
-        command.CommandText = sql;
-        command.CommandTimeout = (int)_options.CurrentValue.Safety.ExpensiveCommandTimeout.TotalSeconds;
-        foreach (var parameter in parameters)
-        {
-            command.Parameters.AddWithValue(parameter.Name, parameter.Value ?? DBNull.Value);
-        }
-
-        var rows = new List<IReadOnlyDictionary<string, object?>>();
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-        {
-            var row = new Dictionary<string, object?>(reader.FieldCount, StringComparer.OrdinalIgnoreCase);
-            for (var index = 0; index < reader.FieldCount; index++)
-            {
-                row[reader.GetName(index)] = await reader.IsDBNullAsync(index, cancellationToken).ConfigureAwait(false)
-                    ? null
-                    : reader.GetValue(index);
-            }
-
-            rows.Add(row);
-        }
+        var command = DapperExtensions.Command(
+            sql,
+            DapperExtensions.ToDynamicParameters(parameters),
+            _options.CurrentValue.Safety.ExpensiveCommandTimeout,
+            cancellationToken);
+        var queryRows = await lease.Connection.QueryAsync(command).ConfigureAwait(false);
+        var rows = DapperExtensions.ToDictionaryRows(queryRows);
 
         var response = new ReportResponse(reportName, lease.Database, DateTimeOffset.UtcNow, rows);
         await _cache.SetAsync(cacheKey, response, _options.CurrentValue.CachePolicy.ReportSnapshotTtl, cancellationToken).ConfigureAwait(false);

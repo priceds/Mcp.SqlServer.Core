@@ -1,7 +1,7 @@
-using System.Data;
 using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
+using Dapper;
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -60,8 +60,13 @@ internal sealed class SqlQueryExecutor
         }
 
         await using var connectionLease = await OpenConnectionAsync(database, cancellationToken).ConfigureAwait(false);
-        await using var command = CreateCommand(connectionLease.Connection, sql, parameters, operation, options);
-        var rows = await ReadRowsAsync(command, options.Safety.MaxRows, cancellationToken).ConfigureAwait(false);
+        var command = DapperExtensions.Command(
+            sql,
+            DapperExtensions.ToDynamicParameters(parameters),
+            _validator.SelectTimeout(operation, options),
+            cancellationToken);
+        var queryRows = await connectionLease.Connection.QueryAsync(command).ConfigureAwait(false);
+        var rows = DapperExtensions.ToDictionaryRows(queryRows, options.Safety.MaxRows);
         var response = new SqlQueryResponse(connectionLease.Database, rows.Count, rows, sql);
 
         if (canCache)
@@ -82,9 +87,13 @@ internal sealed class SqlQueryExecutor
         var options = _options.CurrentValue;
         var operation = _validator.ValidateSql(sql, database, allowAdmin);
         await using var connectionLease = await OpenConnectionAsync(database, cancellationToken).ConfigureAwait(false);
-        await using var command = CreateCommand(connectionLease.Connection, sql, parameters, operation, options);
+        var command = DapperExtensions.Command(
+            sql,
+            DapperExtensions.ToDynamicParameters(parameters),
+            _validator.SelectTimeout(operation, options),
+            cancellationToken);
 
-        var rows = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        var rows = await connectionLease.Connection.ExecuteAsync(command).ConfigureAwait(false);
         return new SqlWriteResponse(connectionLease.Database, rows, $"{operation} statement completed.");
     }
 
@@ -116,8 +125,12 @@ internal sealed class SqlQueryExecutor
             ? $"SET SHOWPLAN_XML ON; {sql}; SET SHOWPLAN_XML OFF;"
             : $"SET STATISTICS XML ON; {sql}; SET STATISTICS XML OFF;";
 
-        await using var command = CreateCommand(connectionLease.Connection, wrappedSql, parameters, SqlOperationKind.Read, options);
-        var planXml = await ExtractPlanXmlAsync(command, cancellationToken).ConfigureAwait(false);
+        var command = DapperExtensions.Command(
+            wrappedSql,
+            DapperExtensions.ToDynamicParameters(parameters),
+            _validator.SelectTimeout(SqlOperationKind.Read, options),
+            cancellationToken);
+        var planXml = await ExtractPlanXmlAsync(connectionLease.Connection, command).ConfigureAwait(false);
         var response = new QueryPlanResponse(connectionLease.Database, planMode, planXml, sql);
         await _cache.SetAsync(cacheKey, response, options.CachePolicy.QueryPlanTtl, cancellationToken).ConfigureAwait(false);
         return response;
@@ -134,13 +147,13 @@ internal sealed class SqlQueryExecutor
         _validator.ValidateStoredProcedureAccess(options);
 
         await using var connectionLease = await OpenConnectionAsync(database, cancellationToken).ConfigureAwait(false);
-        await using var command = connectionLease.Connection.CreateCommand();
-        command.CommandType = CommandType.StoredProcedure;
-        command.CommandText = IdentifierGuard.QuoteMultipart(schema, procedure);
-        command.CommandTimeout = (int)options.Safety.DefaultCommandTimeout.TotalSeconds;
-
-        AddParameters(command, parameters);
-        var rows = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        var command = DapperExtensions.Command(
+            IdentifierGuard.QuoteMultipart(schema, procedure),
+            DapperExtensions.ToDynamicParameters(parameters),
+            options.Safety.DefaultCommandTimeout,
+            cancellationToken,
+            commandType: System.Data.CommandType.StoredProcedure);
+        var rows = await connectionLease.Connection.ExecuteAsync(command).ConfigureAwait(false);
         return new SqlWriteResponse(connectionLease.Database, rows, $"Stored procedure {schema}.{procedure} executed.");
     }
 
@@ -149,82 +162,29 @@ internal sealed class SqlQueryExecutor
         return await _connectionFactory.OpenAsync(database, cancellationToken).ConfigureAwait(false);
     }
 
-    private SqlCommand CreateCommand(
-        SqlConnection connection,
-        string sql,
-        Dictionary<string, JsonElement>? parameters,
-        SqlOperationKind operation,
-        SqlServerMcpOptions options)
-    {
-        var command = connection.CreateCommand();
-        command.CommandText = sql;
-        command.CommandType = CommandType.Text;
-        command.CommandTimeout = (int)_validator.SelectTimeout(operation, options).TotalSeconds;
-        AddParameters(command, parameters);
-        return command;
-    }
-
-    private static void AddParameters(SqlCommand command, Dictionary<string, JsonElement>? parameters)
-    {
-        if (parameters is null)
-        {
-            return;
-        }
-
-        foreach (var (name, value) in parameters)
-        {
-            var parameter = command.CreateParameter();
-            parameter.ParameterName = name.StartsWith('@') ? name : $"@{name}";
-            parameter.Value = JsonElementConverter.ToValue(value) ?? DBNull.Value;
-            command.Parameters.Add(parameter);
-        }
-    }
-
-    private static async Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ReadRowsAsync(SqlCommand command, int maxRows, CancellationToken cancellationToken)
-    {
-        var rows = new List<IReadOnlyDictionary<string, object?>>();
-        await using var reader = await command.ExecuteReaderAsync(CommandBehavior.SequentialAccess, cancellationToken).ConfigureAwait(false);
-
-        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-        {
-            var row = new Dictionary<string, object?>(reader.FieldCount, StringComparer.OrdinalIgnoreCase);
-            for (var index = 0; index < reader.FieldCount; index++)
-            {
-                row[reader.GetName(index)] = await reader.IsDBNullAsync(index, cancellationToken).ConfigureAwait(false)
-                    ? null
-                    : reader.GetValue(index);
-            }
-
-            rows.Add(row);
-            if (rows.Count >= maxRows)
-            {
-                break;
-            }
-        }
-
-        return rows;
-    }
-
-    private async Task<string> ExtractPlanXmlAsync(SqlCommand command, CancellationToken cancellationToken)
+    private async Task<string> ExtractPlanXmlAsync(SqlConnection connection, CommandDefinition command)
     {
         var stopwatch = Stopwatch.StartNew();
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         var builder = new StringBuilder();
+        using var grid = await connection.QueryMultipleAsync(command).ConfigureAwait(false);
 
-        do
+        while (!grid.IsConsumed)
         {
-            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            var rows = await grid.ReadAsync().ConfigureAwait(false);
+            foreach (var row in rows)
             {
-                for (var index = 0; index < reader.FieldCount; index++)
+                if (row is IDictionary<string, object?> typed)
                 {
-                    if (reader.GetFieldType(index) == typeof(string))
+                    foreach (var value in typed.Values)
                     {
-                        builder.Append(reader.GetString(index));
+                        if (value is string text)
+                        {
+                            builder.Append(text);
+                        }
                     }
                 }
             }
         }
-        while (await reader.NextResultAsync(cancellationToken).ConfigureAwait(false));
 
         stopwatch.Stop();
         _logger.LogInformation("Execution plan collected in {ElapsedMs} ms", stopwatch.ElapsedMilliseconds);

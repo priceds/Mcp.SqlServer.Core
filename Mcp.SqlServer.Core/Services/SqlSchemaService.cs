@@ -1,6 +1,8 @@
+using Dapper;
 using Microsoft.Extensions.Options;
 using Mcp.SqlServer.Core.Abstractions;
 using Mcp.SqlServer.Core.Caching;
+using Mcp.SqlServer.Core.Internal;
 
 namespace Mcp.SqlServer.Core.Services;
 
@@ -34,15 +36,8 @@ internal sealed class SqlSchemaService
             """;
 
         await using var lease = await _connectionFactory.OpenAsync(null, cancellationToken).ConfigureAwait(false);
-        await using var command = lease.Connection.CreateCommand();
-        command.CommandText = sql;
-        command.CommandTimeout = (int)_options.CurrentValue.Safety.DefaultCommandTimeout.TotalSeconds;
-        var rows = new List<string>();
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-        {
-            rows.Add(reader.GetString(0));
-        }
+        var command = DapperExtensions.Command(sql, null, _options.CurrentValue.Safety.DefaultCommandTimeout, cancellationToken);
+        var rows = (await lease.Connection.QueryAsync<string>(command).ConfigureAwait(false)).AsList();
 
         await _cache.SetAsync(cacheKey, rows, _options.CurrentValue.CachePolicy.MetadataTtl, cancellationToken).ConfigureAwait(false);
         return (rows, false);
@@ -64,16 +59,9 @@ internal sealed class SqlSchemaService
             ORDER BY name;
             """;
 
-        var rows = new List<string>();
         await using var lease = await _connectionFactory.OpenAsync(database, cancellationToken).ConfigureAwait(false);
-        await using var command = lease.Connection.CreateCommand();
-        command.CommandText = sql;
-        command.CommandTimeout = (int)_options.CurrentValue.Safety.DefaultCommandTimeout.TotalSeconds;
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-        {
-            rows.Add(reader.GetString(0));
-        }
+        var command = DapperExtensions.Command(sql, null, _options.CurrentValue.Safety.DefaultCommandTimeout, cancellationToken);
+        var rows = (await lease.Connection.QueryAsync<string>(command).ConfigureAwait(false)).AsList();
 
         await _cache.SetAsync(cacheKey, rows, _options.CurrentValue.CachePolicy.MetadataTtl, cancellationToken).ConfigureAwait(false);
         return (rows, false);
@@ -99,22 +87,14 @@ internal sealed class SqlSchemaService
             ORDER BY TABLE_SCHEMA, TABLE_NAME;
             """;
 
-        var rows = new List<IReadOnlyDictionary<string, object?>>();
         await using var lease = await _connectionFactory.OpenAsync(database, cancellationToken).ConfigureAwait(false);
-        await using var command = lease.Connection.CreateCommand();
-        command.CommandText = sql;
-        command.Parameters.AddWithValue("@schema", (object?)schema ?? DBNull.Value);
-        command.CommandTimeout = (int)_options.CurrentValue.Safety.DefaultCommandTimeout.TotalSeconds;
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-        {
-            rows.Add(new Dictionary<string, object?>
-            {
-                ["schema"] = reader.GetString(0),
-                ["table"] = reader.GetString(1),
-                ["type"] = reader.GetString(2)
-            });
-        }
+        var command = DapperExtensions.Command(
+            sql,
+            DapperExtensions.ToDynamicParameters(("@schema", schema)),
+            _options.CurrentValue.Safety.DefaultCommandTimeout,
+            cancellationToken);
+        var queryRows = await lease.Connection.QueryAsync(command).ConfigureAwait(false);
+        var rows = DapperExtensions.ToDictionaryRows(queryRows);
 
         await _cache.SetAsync(cacheKey, rows, _options.CurrentValue.CachePolicy.MetadataTtl, cancellationToken).ConfigureAwait(false);
         return (rows, false);
@@ -170,46 +150,12 @@ internal sealed class SqlSchemaService
             ORDER BY fk.name;
             """;
 
-        var columns = new List<TableColumnInfo>();
-        var relationships = new List<RelationshipInfo>();
         await using var lease = await _connectionFactory.OpenAsync(database, cancellationToken).ConfigureAwait(false);
-
-        await using (var columnCommand = lease.Connection.CreateCommand())
-        {
-            columnCommand.CommandText = columnsSql;
-            columnCommand.Parameters.AddWithValue("@schema", schema);
-            columnCommand.Parameters.AddWithValue("@table", table);
-            await using var reader = await columnCommand.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-            {
-                columns.Add(new TableColumnInfo(
-                    reader.GetString(0),
-                    reader.GetString(1),
-                    reader.GetBoolean(2),
-                    await reader.IsDBNullAsync(3, cancellationToken).ConfigureAwait(false) ? null : reader.GetInt32(3),
-                    reader.GetInt32(4),
-                    reader.GetBoolean(5)));
-            }
-        }
-
-        await using (var relationshipCommand = lease.Connection.CreateCommand())
-        {
-            relationshipCommand.CommandText = relationshipsSql;
-            relationshipCommand.Parameters.AddWithValue("@schema", schema);
-            relationshipCommand.Parameters.AddWithValue("@table", table);
-            await using var reader = await relationshipCommand.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-            {
-                relationships.Add(new RelationshipInfo(
-                    reader.GetString(0),
-                    reader.GetString(1),
-                    reader.GetString(2),
-                    reader.GetString(3),
-                    reader.GetString(4),
-                    reader.GetString(5),
-                    reader.GetString(6)));
-            }
-        }
+        var parameters = DapperExtensions.ToDynamicParameters(("@schema", schema), ("@table", table));
+        var columnCommand = DapperExtensions.Command(columnsSql, parameters, _options.CurrentValue.Safety.DefaultCommandTimeout, cancellationToken);
+        var relationshipCommand = DapperExtensions.Command(relationshipsSql, parameters, _options.CurrentValue.Safety.DefaultCommandTimeout, cancellationToken);
+        var columns = (await lease.Connection.QueryAsync<TableColumnInfo>(columnCommand).ConfigureAwait(false)).AsList();
+        var relationships = (await lease.Connection.QueryAsync<RelationshipInfo>(relationshipCommand).ConfigureAwait(false)).AsList();
 
         var description = new TableDescription(db, schema, table, columns, relationships);
         await _cache.SetAsync(cacheKey, description, _options.CurrentValue.CachePolicy.MetadataTtl, cancellationToken).ConfigureAwait(false);
@@ -248,24 +194,13 @@ internal sealed class SqlSchemaService
             ORDER BY ps.name, pt.name, fk.name;
             """;
 
-        var relationships = new List<RelationshipInfo>();
         await using var lease = await _connectionFactory.OpenAsync(database, cancellationToken).ConfigureAwait(false);
-        await using var command = lease.Connection.CreateCommand();
-        command.CommandText = sql;
-        command.Parameters.AddWithValue("@schema", (object?)schema ?? DBNull.Value);
-        command.Parameters.AddWithValue("@table", (object?)table ?? DBNull.Value);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-        {
-            relationships.Add(new RelationshipInfo(
-                reader.GetString(0),
-                reader.GetString(1),
-                reader.GetString(2),
-                reader.GetString(3),
-                reader.GetString(4),
-                reader.GetString(5),
-                reader.GetString(6)));
-        }
+        var command = DapperExtensions.Command(
+            sql,
+            DapperExtensions.ToDynamicParameters(("@schema", schema), ("@table", table)),
+            _options.CurrentValue.Safety.DefaultCommandTimeout,
+            cancellationToken);
+        var relationships = (await lease.Connection.QueryAsync<RelationshipInfo>(command).ConfigureAwait(false)).AsList();
 
         await _cache.SetAsync(cacheKey, relationships, _options.CurrentValue.CachePolicy.MetadataTtl, cancellationToken).ConfigureAwait(false);
         return (relationships, false);
@@ -295,21 +230,13 @@ internal sealed class SqlSchemaService
             ORDER BY c.TABLE_SCHEMA, c.TABLE_NAME, c.COLUMN_NAME;
             """;
 
-        var matches = new List<SchemaSearchMatch>();
         await using var lease = await _connectionFactory.OpenAsync(database, cancellationToken).ConfigureAwait(false);
-        await using var command = lease.Connection.CreateCommand();
-        command.CommandText = sql;
-        command.Parameters.AddWithValue("@term", $"%{searchTerm}%");
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-        {
-            matches.Add(new SchemaSearchMatch(
-                reader.GetString(0),
-                reader.GetString(1),
-                reader.GetString(2),
-                reader.GetString(3),
-                reader.GetString(4)));
-        }
+        var command = DapperExtensions.Command(
+            sql,
+            DapperExtensions.ToDynamicParameters(("@term", $"%{searchTerm}%")),
+            _options.CurrentValue.Safety.DefaultCommandTimeout,
+            cancellationToken);
+        var matches = (await lease.Connection.QueryAsync<SchemaSearchMatch>(command).ConfigureAwait(false)).AsList();
 
         await _cache.SetAsync(cacheKey, matches, _options.CurrentValue.CachePolicy.MetadataTtl, cancellationToken).ConfigureAwait(false);
         return (matches, false);

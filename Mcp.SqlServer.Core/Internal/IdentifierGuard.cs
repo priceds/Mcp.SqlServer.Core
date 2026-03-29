@@ -20,6 +20,10 @@ internal static partial class IdentifierGuard
 
     public static string QuoteMultipart(params string?[] parts)
     {
-        return string.Join(".", parts.Where(static part => !string.IsNullOrWhiteSpace(part)).Select(Quote));
+        return string.Join(
+            ".",
+            parts
+                .Where(static part => !string.IsNullOrWhiteSpace(part))
+                .Select(static part => Quote(part!)));
     }
 }

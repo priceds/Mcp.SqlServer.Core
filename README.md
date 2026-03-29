@@ -132,7 +132,7 @@ Read-result caching is intentionally bypassed for non-deterministic or session-s
 
 ## Performance Techniques
 
-- Async ADO.NET execution with `Microsoft.Data.SqlClient`
+- Async Dapper-based query execution on top of `Microsoft.Data.SqlClient`
 - Connection pooling through standard SQL client behavior
 - JSON source generation for tool request and response contracts
 - Shared service core for both transports
