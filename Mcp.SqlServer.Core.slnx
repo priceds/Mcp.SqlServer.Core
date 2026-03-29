@@ -1,0 +1,7 @@
+<Solution>
+  <Project Path="Mcp.SqlServer.Core.Abstractions/Mcp.SqlServer.Core.Abstractions.csproj" />
+  <Project Path="Mcp.SqlServer.Core.HttpHost/Mcp.SqlServer.Core.HttpHost.csproj" />
+  <Project Path="Mcp.SqlServer.Core.StdioHost/Mcp.SqlServer.Core.StdioHost.csproj" />
+  <Project Path="Mcp.SqlServer.Core.Tests/Mcp.SqlServer.Core.Tests.csproj" />
+  <Project Path="Mcp.SqlServer.Core/Mcp.SqlServer.Core.csproj" />
+</Solution>
