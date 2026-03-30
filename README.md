@@ -194,6 +194,8 @@ Release automation lives in [release.yml](/Users/sarvesh/Mcp.SqlServer.Core/.git
 - packages release archives
 - uploads them to the GitHub Release
 
+Regular CI lives in [ci.yml](/Users/sarvesh/Mcp.SqlServer.Core/.github/workflows/ci.yml). It runs on pushes to `main`, pull requests targeting `main`, and manual dispatch. CI validates restore, build, tests, and a Linux `linux-x64` NativeAOT smoke publish.
+
 ## Running the Server
 
 ### 1. Restore

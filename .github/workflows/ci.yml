@@ -1,0 +1,51 @@
+name: ci
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang zlib1g-dev libssl-dev
+
+      - name: Restore
+        run: dotnet restore Mcp.SqlServer.Core.slnx
+
+      - name: Build
+        run: dotnet build Mcp.SqlServer.Core.slnx --no-restore -m:1 -p:BuildInParallel=false -p:UseSharedCompilation=false /clp:ErrorsOnly
+
+      - name: Test
+        run: dotnet test Mcp.SqlServer.Core.Tests/Mcp.SqlServer.Core.Tests.csproj --no-build -m:1 -p:BuildInParallel=false -p:UseSharedCompilation=false
+
+      - name: NativeAOT smoke publish
+        run: >
+          dotnet publish Mcp.SqlServer.Core.StdioHost/Mcp.SqlServer.Core.StdioHost.csproj
+          --configuration Release
+          --runtime linux-x64
+          --no-restore
+          -p:PublishAot=true
+          -p:PublishSingleFile=true
+          -p:SelfContained=true
+          -p:StripSymbols=true
+          --output artifacts/linux-x64-smoke
