@@ -1,0 +1,120 @@
+name: release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-release-assets:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            rid: linux-x64
+            archive_name: Mcp.SqlServer.Core-linux-x64.tar.gz
+            artifact_name: Mcp.SqlServer.Core-linux-x64
+          - runner: windows-latest
+            rid: win-x64
+            archive_name: Mcp.SqlServer.Core-win-x64.zip
+            artifact_name: Mcp.SqlServer.Core-win-x64
+          - runner: macos-14
+            rid: osx-arm64
+            archive_name: Mcp.SqlServer.Core-osx-arm64.tar.gz
+            artifact_name: Mcp.SqlServer.Core-osx-arm64
+
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Install Linux native dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang zlib1g-dev libssl-dev
+
+      - name: Install macOS native dependencies
+        if: runner.os == 'macOS'
+        run: brew install openssl@3 brotli zlib
+
+      - name: Restore
+        run: dotnet restore Mcp.SqlServer.Core.slnx
+
+      - name: Test
+        run: dotnet test Mcp.SqlServer.Core.Tests/Mcp.SqlServer.Core.Tests.csproj --configuration Release --no-restore -m:1 -p:BuildInParallel=false -p:UseSharedCompilation=false
+
+      - name: Publish NativeAOT binary
+        env:
+          CPATH: ${{ runner.os == 'macOS' && '/opt/homebrew/include:/opt/homebrew/opt/openssl@3/include:/opt/homebrew/opt/zlib/include' || '' }}
+          LIBRARY_PATH: ${{ runner.os == 'macOS' && '/opt/homebrew/lib:/opt/homebrew/opt/openssl@3/lib:/opt/homebrew/opt/zlib/lib' || '' }}
+          DYLD_FALLBACK_LIBRARY_PATH: ${{ runner.os == 'macOS' && '/opt/homebrew/lib:/opt/homebrew/opt/openssl@3/lib:/opt/homebrew/opt/zlib/lib' || '' }}
+        run: >
+          dotnet publish Mcp.SqlServer.Core.StdioHost/Mcp.SqlServer.Core.StdioHost.csproj
+          --configuration Release
+          --runtime ${{ matrix.rid }}
+          --no-restore
+          -p:PublishAot=true
+          -p:PublishSingleFile=true
+          -p:SelfContained=true
+          -p:StripSymbols=true
+          --output artifacts/${{ matrix.rid }}
+
+      - name: Prepare release payload
+        shell: bash
+        run: |
+          mkdir -p release/${{ matrix.rid }}
+          cp -R artifacts/${{ matrix.rid }}/. release/${{ matrix.rid }}/
+          cp Mcp.SqlServer.Core.StdioHost/appsettings.json release/${{ matrix.rid }}/appsettings.json.example
+
+      - name: Package tar.gz
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p packaged
+          tar -czf packaged/${{ matrix.archive_name }} -C release/${{ matrix.rid }} .
+
+      - name: Package zip
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path packaged -Force | Out-Null
+          Compress-Archive -Path "release/${{ matrix.rid }}/*" -DestinationPath "packaged/${{ matrix.archive_name }}" -Force
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: packaged/${{ matrix.archive_name }}
+
+      - name: Upload GitHub release asset
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/v')
+        with:
+          files: packaged/${{ matrix.archive_name }}
+          fail_on_unmatched_files: true
+          body: |
+            NativeAOT self-contained release assets for `Mcp.SqlServer.Core`.
+
+            Included targets:
+            - `linux-x64`
+            - `win-x64`
+            - `osx-arm64`
+
+            Quick setup:
+            1. Download the archive for your OS.
+            2. Extract it anywhere on disk.
+            3. Copy `appsettings.json.example` to `appsettings.json`.
+            4. Update the SQL Server connection string and safety settings.
+            5. Point your MCP client at the extracted `Mcp.SqlServer.Core.StdioHost` binary.
+
+            Full configuration and MCP client examples are in `README.md`.

@@ -173,6 +173,27 @@ Both hosts bind the same `SqlServerMcp` configuration section.
 }
 ```
 
+## NativeAOT Releases
+
+The default shipped artifact is the `stdio` host, published as a NativeAOT, self-contained, single-file executable for:
+
+- `linux-x64`
+- `win-x64`
+- `osx-arm64`
+
+Each release archive includes:
+
+- the platform-native `Mcp.SqlServer.Core.StdioHost` binary
+- `appsettings.json.example`
+
+Release automation lives in [release.yml](/Users/sarvesh/Mcp.SqlServer.Core/.github/workflows/release.yml). When you push a tag like `v0.1.0`, GitHub Actions:
+
+- restores the solution
+- runs the test suite
+- publishes NativeAOT binaries for the three target platforms
+- packages release archives
+- uploads them to the GitHub Release
+
 ## Running the Server
 
 ### 1. Restore
@@ -191,6 +212,47 @@ dotnet build Mcp.SqlServer.Core.slnx
 
 ```bash
 dotnet run --project Mcp.SqlServer.Core.StdioHost
+```
+
+### 3a. Publish a local NativeAOT binary
+
+Apple Silicon:
+
+```bash
+brew install openssl@3 brotli zlib
+
+export CPATH=/opt/homebrew/include:/opt/homebrew/opt/openssl@3/include:/opt/homebrew/opt/zlib/include
+export LIBRARY_PATH=/opt/homebrew/lib:/opt/homebrew/opt/openssl@3/lib:/opt/homebrew/opt/zlib/lib
+export DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/lib:/opt/homebrew/opt/openssl@3/lib:/opt/homebrew/opt/zlib/lib
+
+dotnet publish Mcp.SqlServer.Core.StdioHost/Mcp.SqlServer.Core.StdioHost.csproj \
+  -c Release \
+  -r osx-arm64 \
+  -p:PublishAot=true \
+  -p:PublishSingleFile=true \
+  -p:SelfContained=true
+```
+
+Linux x64:
+
+```bash
+dotnet publish Mcp.SqlServer.Core.StdioHost/Mcp.SqlServer.Core.StdioHost.csproj \
+  -c Release \
+  -r linux-x64 \
+  -p:PublishAot=true \
+  -p:PublishSingleFile=true \
+  -p:SelfContained=true
+```
+
+Windows x64:
+
+```bash
+dotnet publish Mcp.SqlServer.Core.StdioHost/Mcp.SqlServer.Core.StdioHost.csproj ^
+  -c Release ^
+  -r win-x64 ^
+  -p:PublishAot=true ^
+  -p:PublishSingleFile=true ^
+  -p:SelfContained=true
 ```
 
 ### 4. Run the HTTP host
@@ -214,6 +276,43 @@ The HTTP host is built for container or central MCP deployment:
 - keep admin tools disabled unless a dedicated operational deployment requires them
 - front the service with your normal reverse proxy and auth layer
 
+## MCP Client Setup
+
+For release binaries, configure your MCP client to launch the extracted stdio executable directly.
+
+Claude Desktop example on macOS or Linux:
+
+```json
+{
+  "mcpServers": {
+    "sqlserver": {
+      "command": "/absolute/path/to/Mcp.SqlServer.Core.StdioHost",
+      "args": []
+    }
+  }
+}
+```
+
+Windows example:
+
+```json
+{
+  "mcpServers": {
+    "sqlserver": {
+      "command": "C:\\absolute\\path\\to\\Mcp.SqlServer.Core.StdioHost.exe",
+      "args": []
+    }
+  }
+}
+```
+
+Before launching the binary:
+
+1. Copy `appsettings.json.example` to `appsettings.json`.
+2. Set the SQL Server connection string.
+3. Review `AllowedDatabases`, row limits, and admin-tool settings.
+4. Keep `EnableAdminTools` disabled unless you explicitly need it.
+
 ## Example Positioning
 
 Use this server when you want:
@@ -230,6 +329,12 @@ Current verification in this repo:
 ```bash
 dotnet build Mcp.SqlServer.Core.slnx --no-restore -m:1 -p:BuildInParallel=false -p:UseSharedCompilation=false /clp:ErrorsOnly
 dotnet test Mcp.SqlServer.Core.Tests/Mcp.SqlServer.Core.Tests.csproj -m:1 -p:BuildInParallel=false -p:UseSharedCompilation=false
+```
+
+NativeAOT smoke test:
+
+```bash
+dotnet publish Mcp.SqlServer.Core.StdioHost/Mcp.SqlServer.Core.StdioHost.csproj -c Release -r osx-arm64 -p:PublishAot=true -p:PublishSingleFile=true -p:SelfContained=true
 ```
 
 ## Current Status

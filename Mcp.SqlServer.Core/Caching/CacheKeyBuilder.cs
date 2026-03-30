@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -28,8 +29,35 @@ internal static class CacheKeyBuilder
 
     private static string Hash(object? value)
     {
-        var serialized = value is null ? "<null>" : JsonSerializer.Serialize(value);
+        var serialized = value switch
+        {
+            null => "<null>",
+            string text => text,
+            IReadOnlyDictionary<string, JsonElement> parameters => SerializeParameters(parameters),
+            _ => Convert.ToString(value, CultureInfo.InvariantCulture) ?? value.ToString() ?? "<null>"
+        };
+
         var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(serialized));
         return Convert.ToHexString(bytes);
+    }
+
+    private static string SerializeParameters(IReadOnlyDictionary<string, JsonElement> parameters)
+    {
+        if (parameters.Count is 0)
+        {
+            return "<empty>";
+        }
+
+        var builder = new StringBuilder();
+        foreach (var pair in parameters.OrderBy(static pair => pair.Key, StringComparer.Ordinal))
+        {
+            builder
+                .Append(pair.Key)
+                .Append('=')
+                .Append(pair.Value.GetRawText())
+                .Append(';');
+        }
+
+        return builder.ToString();
     }
 }
